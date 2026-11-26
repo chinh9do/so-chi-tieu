@@ -1,0 +1,77 @@
+name: Build APK Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['www/**', 'package.json', 'package-lock.json', 'capacitor.config.json', 'resources/**']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Kiểm tra mật khẩu khoá ký
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::error::Chưa có secret KEYSTORE_PASSWORD. Vào Settings > Secrets and variables > Actions để tạo (xem README)."
+            exit 1
+          fi
+
+      - name: Cài thư viện
+        run: npm ci
+
+      - name: Tạo project Android
+        run: |
+          npx cap add android
+          rm -f android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+          for d in resources/android/mipmap-*; do
+            cp "$d"/*.png "android/app/src/main/res/$(basename "$d")/"
+          done
+          npx cap sync android
+
+      - name: Build bản release
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Ký APK
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          set -e
+          mkdir -p out
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > release.keystore
+          else
+            keytool -genkeypair -keystore release.keystore -storetype PKCS12 -alias sochitieu \
+              -keyalg RSA -keysize 2048 -validity 36500 \
+              -storepass "$KEYSTORE_PASSWORD" -keypass "$KEYSTORE_PASSWORD" -dname "CN=So Chi Tieu"
+            base64 -w0 release.keystore > out/KEYSTORE_B64.txt
+            echo "::warning::Lần đầu build: đã tạo khoá ký mới. Lưu nội dung KEYSTORE_B64.txt (trong artifact) thành secret KEYSTORE_B64 rồi xoá artifact."
+          fi
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$BT/zipalign" -p -f 4 android/app/build/outputs/apk/release/app-release-unsigned.apk aligned.apk
+          "$BT/apksigner" sign --ks release.keystore --ks-key-alias sochitieu \
+            --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEYSTORE_PASSWORD \
+            --out out/so-chi-tieu.apk aligned.apk
+          "$BT/apksigner" verify out/so-chi-tieu.apk
+          rm -f release.keystore
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: so-chi-tieu-apk
+          path: out/
+          retention-days: 3
