@@ -1,0 +1,16 @@
+{
+  "name": "Sổ chi tiêu",
+  "short_name": "Chi tiêu",
+  "description": "Ghi chi tiêu hằng ngày, tổng kết tháng và năm, sổ tiền cưới, theo dõi thay nhớt. Dữ liệu lưu trong máy.",
+  "lang": "vi",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#EDF0EB",
+  "theme_color": "#EDF0EB",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

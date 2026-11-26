@@ -1,0 +1,6 @@
+{
+  "appId": "vn.sochitieu.app",
+  "appName": "Sổ chi tiêu",
+  "webDir": "www",
+  "android": { "allowMixedContent": false }
+}
