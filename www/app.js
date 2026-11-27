@@ -3,6 +3,7 @@
 
 const APP_ID = 'so-chi-tieu';
 const DATA_VERSION = 1;
+const APP_VERSION = '1.1.1';
 
 const DEFAULT_CATS = [
   { id: 'an', short: 'Ăn uống', name: 'Ăn uống hằng ngày', group: 'Thiết yếu', color: '#1F8A9E' },
@@ -1027,7 +1028,9 @@ function openSettings() {
   <h3>Dữ liệu</h3>
   <p class="hint">${nf0.format(S.transactions.length)} khoản chi, ${S.weddings.length} đám cưới, ${S.oil.length} lần thay nhớt, ${S.monthNotes.length} ghi chú tháng.</p>
   <div class="btnrow"><button class="secondary danger" data-action="wipe">Xoá toàn bộ dữ liệu</button></div>
-  <p class="hint">Phiên bản dữ liệu ${DATA_VERSION}</p>`, pn => {
+  <h3>Phiên bản</h3>
+  <p class="hint">App ${APP_VERSION}, dữ liệu phiên bản ${DATA_VERSION}.</p>
+  <div class="btnrow"><button class="secondary" data-action="check-update">Kiểm tra cập nhật</button></div>`, pn => {
     mountSyncForm(pn);
     $('#setInterval', pn).onchange = e => { const v = +String(e.target.value).replace(/\D/g, ''); if (v > 0) { S.settings.oilInterval = v; save(); toast('Đã lưu chu kỳ thay nhớt'); } };
   });
@@ -1039,6 +1042,35 @@ async function wipe() {
   S = emptyState(); await store.set('state', S); closeSheet(); render(); toast('Đã xoá toàn bộ dữ liệu');
 }
 
+
+/* ---------- tự cập nhật app ---------- */
+let swReg = null;
+function setupUpdates() {
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloading) return;
+    const busy = $('#sheet').classList.contains('open') || ($('#amt') && $('#amt').value) || ($('#note') && $('#note').value);
+    if (busy) {
+      if (!$('#updBanner')) $('#view').insertAdjacentHTML('afterbegin', `<div class="banner" id="updBanner"><span>Đã có bản cập nhật.</span><button data-action="reload">Tải lại</button></div>`);
+      return;
+    }
+    reloading = true; location.reload();
+  });
+  navigator.serviceWorker.register('sw.js').then(reg => {
+    swReg = reg;
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
+  }).catch(() => {});
+}
+async function checkUpdate() {
+  if (!swReg) { toast('Bản này không tự cập nhật được'); return; }
+  toast('Đang kiểm tra…');
+  try {
+    await swReg.update();
+    if (swReg.installing || swReg.waiting) toast('Đang tải bản mới, app sẽ tự mở lại');
+    else toast(`Đang dùng bản mới nhất (${APP_VERSION})`);
+  } catch { toast('Không kiểm tra được, hãy thử khi có mạng'); }
+}
 /* ---------- render & events ---------- */
 const TITLES = { nhap: 'Sổ chi tiêu', so: 'Sổ chi', tong: 'Tổng kết', cuoi: 'Tiền cưới', xe: 'Xe' };
 function render() {
@@ -1083,6 +1115,8 @@ document.addEventListener('click', e => {
     case 'wipe': wipe(); break;
     case 'sync-now': syncNow({ silent: false }).then(() => { if ($('#sheet').classList.contains('open')) showSyncStatus(); else render(); }); showSyncStatus(); break;
     case 'sync-off': syncOff(); break;
+    case 'check-update': checkUpdate(); break;
+    case 'reload': location.reload(); break;
   }
 });
 document.addEventListener('submit', e => { if (e.target.id === 'entryForm') submitEntry(e); });
@@ -1111,7 +1145,5 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet()
   if (syncOn()) syncNow();
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') scheduleSync(800); });
   window.addEventListener('online', () => scheduleSync(800));
-  if ('serviceWorker' in navigator && !isNative() && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-  }
+  if ('serviceWorker' in navigator && !isNative() && (location.protocol === 'https:' || location.hostname === 'localhost')) setupUpdates();
 })();
