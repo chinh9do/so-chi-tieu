@@ -10,13 +10,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
@@ -36,6 +36,7 @@ jobs:
       - name: Tạo project Android
         run: |
           npx cap add android
+          # Thay icon mặc định bằng icon của app
           rm -f android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
           for d in resources/android/mipmap-*; do
             cp "$d"/*.png "android/app/src/main/res/$(basename "$d")/"
@@ -70,7 +71,7 @@ jobs:
           "$BT/apksigner" verify out/so-chi-tieu.apk
           rm -f release.keystore
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: so-chi-tieu-apk
           path: out/
