@@ -1,5 +1,5 @@
 /* Cache toàn bộ app để chạy offline. Đổi VERSION mỗi khi cập nhật code. */
-const VERSION = 'v1.0.0';
+const VERSION = 'v1.1.0';
 const CACHE = 'so-chi-tieu-' + VERSION;
 const FILES = [
   './', './index.html', './app.js', './manifest.webmanifest', './vendor/xlsx.mini.min.js',
@@ -15,6 +15,7 @@ self.addEventListener('activate', e => {
 });
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
+  if (new URL(e.request.url).origin !== location.origin) return; // API đồng bộ: không cache
   e.respondWith(
     caches.match(e.request, { ignoreSearch: true }).then(hit => hit || fetch(e.request).then(res => {
       if (res.ok && new URL(e.request.url).origin === location.origin) {

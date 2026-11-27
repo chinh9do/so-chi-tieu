@@ -106,6 +106,7 @@ let saveTimer = null;
 function save() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => store.set('state', S).catch(e => toast('Không lưu được: ' + e.message)), 120);
+  if (typeof scheduleSync === 'function') scheduleSync();
 }
 function normalize(d) {
   const s = emptyState();
@@ -186,7 +187,9 @@ function txRow(t) {
 function banners() {
   let h = '';
   const st = S.settings;
-  if (S.transactions.length) {
+  const synced = syncOn() && Sync.st.lastSync && daysBetween(Sync.st.lastSync.slice(0, 10), today()) < 7;
+  if (syncOn() && Sync.st.lastError) h += `<div class="banner"><span>Chưa đồng bộ được: ${esc(Sync.st.lastError)}</span><button data-action="sync-now">Thử lại</button></div>`;
+  if (S.transactions.length && !synced) {
     const days = st.lastBackup ? daysBetween(st.lastBackup.slice(0, 10), today()) : null;
     if (days === null || days >= 30) {
       h += `<div class="banner"><span>${days === null ? 'Bạn chưa sao lưu lần nào.' : `Đã ${days} ngày chưa sao lưu.`}</span><button data-action="backup-json">Sao lưu ngay</button></div>`;
@@ -756,16 +759,268 @@ async function handleImportFile(file) {
   } catch (e) { toast('Không đọc được file: ' + e.message); }
 }
 
+/* ---------- đồng bộ đám mây: Supabase + mã hoá đầu-cuối ---------- */
+const b64e = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+const b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const b64url = u8 => b64e(u8).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const PBKDF2_ITER = 600000;
+const VERIFY_TEXT = 'so-chi-tieu:ok';
+const BATCH = 400;
+const Sync = { st: null, keys: null, busy: false, pending: false, timer: null };
+
+async function syncLoad() {
+  try { Sync.st = (await store.get('sync')) || null; Sync.keys = (await store.get('synckeys')) || null; } catch { Sync.st = null; Sync.keys = null; }
+}
+const syncPersist = () => store.set('sync', Sync.st);
+const syncOn = () => !!(Sync.st && Sync.st.enabled && Sync.st.refresh && Sync.keys);
+
+async function deriveKeys(pass, salt) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveBits']);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: PBKDF2_ITER }, base, 512));
+  const aes = await crypto.subtle.importKey('raw', bits.slice(0, 32), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+  const hmac = await crypto.subtle.importKey('raw', bits.slice(32), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  bits.fill(0);
+  return { aes, hmac };
+}
+async function encObj(keys, obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, keys.aes, new TextEncoder().encode(JSON.stringify(obj))));
+  return { iv: b64e(iv), data: b64e(ct) };
+}
+async function decObj(keys, iv, data) {
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(iv) }, keys.aes, b64d(data));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+// Mã dòng trên server = HMAC(khoá bí mật, mã bản ghi) → server không suy ra được ngày hay danh mục
+async function rowId(key) {
+  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', Sync.keys.hmac, new TextEncoder().encode(key)));
+  return b64url(sig.slice(0, 24));
+}
+function fnv(str) { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36) + '.' + str.length; }
+
+function takeSession(j) {
+  Object.assign(Sync.st, { access: j.access_token, refresh: j.refresh_token, exp: Date.now() + (j.expires_in || 3600) * 1000, userId: (j.user && j.user.id) || Sync.st.userId });
+}
+async function authErr(r, fallback) {
+  let j = {}; try { j = await r.json(); } catch {}
+  return new Error(j.error_description || j.msg || j.message || j.error || `${fallback} (${r.status})`);
+}
+async function sbRefresh() {
+  const st = Sync.st;
+  if (!st || !st.refresh) { const e = new Error('Chưa đăng nhập'); e.auth = true; throw e; }
+  const r = await fetch(st.url + '/auth/v1/token?grant_type=refresh_token', { method: 'POST', headers: { apikey: st.key, 'Content-Type': 'application/json' }, body: JSON.stringify({ refresh_token: st.refresh }) });
+  if (!r.ok) { const e = new Error('Phiên đăng nhập đã hết hạn. Hãy bật lại đồng bộ.'); e.auth = true; throw e; }
+  takeSession(await r.json());
+  if (st.enabled) await syncPersist();
+}
+async function sbFetch(path, { method = 'GET', body, headers = {} } = {}) {
+  const st = Sync.st;
+  if (!st.access || Date.now() > (st.exp || 0) - 60000) await sbRefresh();
+  const go = () => fetch(st.url + path, {
+    method, body: body === undefined ? undefined : JSON.stringify(body),
+    headers: { apikey: st.key, Authorization: 'Bearer ' + st.access, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers },
+  });
+  let r = await go();
+  if (r.status === 401) { await sbRefresh(); r = await go(); }
+  if (!r.ok) {
+    let msg = `Lỗi máy chủ (${r.status})`;
+    try { const j = await r.json(); msg = j.message || j.msg || j.error || msg; } catch {}
+    throw new Error(msg);
+  }
+  const txt = await r.text();
+  return txt ? JSON.parse(txt) : null;
+}
+
+const ARR = { tx: 'transactions', wd: 'weddings', oil: 'oil', mn: 'monthNotes' };
+function localRecords() {
+  const m = new Map();
+  for (const [k, arr] of Object.entries(ARR)) for (const x of S[arr]) m.set(`${k}:${x.id}`, x);
+  m.set('set:settings', S.settings);
+  m.set('cat:all', S.categories);
+  return m;
+}
+function applyRemote(key, del, v) {
+  const i0 = key.indexOf(':'), k = key.slice(0, i0), id = key.slice(i0 + 1);
+  if (k === 'set') { if (!del && v) S.settings = v; return; }
+  if (k === 'cat') { if (!del && Array.isArray(v) && v.length) S.categories = v; return; }
+  const arr = ARR[k]; if (!arr) return;
+  const i = S[arr].findIndex(x => x.id === id);
+  if (del) { if (i >= 0) S[arr].splice(i, 1); }
+  else if (i >= 0) S[arr][i] = v; else S[arr].push(v);
+}
+
+function syncStatusText() {
+  const st = Sync.st || {};
+  if (Sync.busy) return st.progress || 'Đang đồng bộ…';
+  if (st.lastError) return 'Chưa đồng bộ được: ' + st.lastError;
+  if (st.lastSync) { const d = new Date(st.lastSync); return `Đồng bộ lần cuối lúc ${pad(d.getHours())}:${pad(d.getMinutes())} ngày ${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`; }
+  return 'Chưa đồng bộ lần nào';
+}
+function showSyncStatus() { const el = $('#syncStatus'); if (el) el.textContent = syncStatusText(); }
+function scheduleSync(ms = 4000) {
+  if (!syncOn()) return;
+  clearTimeout(Sync.timer);
+  Sync.timer = setTimeout(() => syncNow(), ms);
+}
+function softRender() {
+  if ($('#sheet').classList.contains('open')) return;
+  const typing = ui.tab === 'nhap' && (($('#amt') && $('#amt').value) || ($('#note') && $('#note').value));
+  if (!typing) render();
+}
+
+async function syncNow({ silent = true } = {}) {
+  if (!syncOn()) return;
+  if (Sync.busy) { Sync.pending = true; return; }
+  if (!navigator.onLine) { Sync.st.lastError = 'Đang offline, sẽ đồng bộ khi có mạng'; showSyncStatus(); return; }
+  const st = Sync.st; st.index = st.index || {}; st.lastRev = st.lastRev || 0;
+  Sync.busy = true; st.progress = ''; showSyncStatus();
+  let changed = false;
+  try {
+    // 1) Kéo thay đổi từ máy chủ về (theo số thứ tự rev tăng dần)
+    const local0 = localRecords();
+    const hashOf = v => v === undefined ? undefined : fnv(JSON.stringify(v));
+    const dirty = key => !st.preferRemote && hashOf(local0.get(key)) !== st.index[key];
+    for (;;) {
+      const rows = await sbFetch(`/rest/v1/items?select=rev,iv,data&rev=gt.${st.lastRev}&order=rev.asc&limit=1000`);
+      for (const r of rows) {
+        const o = await decObj(Sync.keys, r.iv, r.data);
+        if (!dirty(o.key)) {
+          const before = hashOf(local0.get(o.key));
+          applyRemote(o.key, o.del, o.v);
+          if (o.del) delete st.index[o.key]; else st.index[o.key] = fnv(JSON.stringify(o.v));
+          if (before !== (o.del ? undefined : st.index[o.key])) changed = true;
+        }
+        st.lastRev = Math.max(st.lastRev, +r.rev);
+      }
+      if (rows.length) await syncPersist();
+      if (rows.length < 1000) break;
+      st.progress = 'Đang tải dữ liệu về…'; showSyncStatus();
+    }
+    if (st.preferRemote) { delete st.preferRemote; await syncPersist(); }
+    if (changed) await store.set('state', S);
+
+    // 2) Đẩy thay đổi trong máy lên (bản ghi mới/sửa/xoá so với lần đồng bộ trước)
+    const local = localRecords(), ops = [];
+    for (const [key, v] of local) { const h = fnv(JSON.stringify(v)); if (st.index[key] !== h) ops.push({ key, v, h }); }
+    for (const key of Object.keys(st.index)) if (!local.has(key)) ops.push({ key, del: true });
+    for (let i = 0; i < ops.length; i += BATCH) {
+      const batch = ops.slice(i, i + BATCH), rows = [];
+      for (const op of batch) {
+        const e = await encObj(Sync.keys, op.del ? { key: op.key, del: true } : { key: op.key, v: op.v });
+        rows.push({ user_id: st.userId, id: await rowId(op.key), iv: e.iv, data: e.data });
+      }
+      await sbFetch('/rest/v1/items?on_conflict=user_id,id', { method: 'POST', body: rows, headers: { Prefer: 'resolution=merge-duplicates,return=minimal' } });
+      for (const op of batch) { if (op.del) delete st.index[op.key]; else st.index[op.key] = op.h; }
+      await syncPersist();
+      if (ops.length > BATCH) { st.progress = `Đang tải lên ${nf0.format(Math.min(i + BATCH, ops.length))}/${nf0.format(ops.length)}…`; showSyncStatus(); }
+    }
+    st.lastSync = new Date().toISOString(); st.lastError = null; st.progress = '';
+    await syncPersist();
+  } catch (e) {
+    st.lastError = e.message; st.progress = '';
+    if (e.auth) { st.enabled = false; Sync.keys = null; await store.set('synckeys', null).catch(() => {}); }
+    await syncPersist().catch(() => {});
+    if (!silent || e.auth) toast('Đồng bộ lỗi: ' + e.message);
+  } finally {
+    Sync.busy = false; showSyncStatus();
+    if (changed) softRender();
+    if (Sync.pending) { Sync.pending = false; scheduleSync(1500); }
+  }
+}
+
+async function syncSetup({ url, key, email, password, pass, pass2 }) {
+  url = String(url || '').trim().replace(/\/+$/, '');
+  if (!/^https:\/\/[^/]+$/.test(url) && !/^http:\/\/localhost(:\d+)?$/.test(url)) throw new Error('Project URL có dạng https://xxxx.supabase.co');
+  if (!key.trim()) throw new Error('Thiếu Publishable key');
+  if (!email.trim() || !password) throw new Error('Nhập email và mật khẩu đăng nhập');
+  if (!pass || pass.length < 8) throw new Error('Mật khẩu mã hoá cần ít nhất 8 ký tự');
+  const prev = Sync.st;
+  Sync.st = { url, key: key.trim(), email: email.trim(), enabled: false, lastRev: 0, index: {} };
+  try {
+    const r = await fetch(url + '/auth/v1/token?grant_type=password', { method: 'POST', headers: { apikey: Sync.st.key, 'Content-Type': 'application/json' }, body: JSON.stringify({ email: Sync.st.email, password }) });
+    if (!r.ok) throw await authErr(r, 'Đăng nhập thất bại');
+    takeSession(await r.json());
+    const v = await sbFetch('/rest/v1/vault?select=salt,check_iv,check_ct');
+    if (!v || !v.length) {
+      if (pass !== pass2) throw new Error('Hai lần nhập mật khẩu mã hoá không khớp');
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const keys = await deriveKeys(pass, salt);
+      const chk = await encObj(keys, VERIFY_TEXT);
+      await sbFetch('/rest/v1/vault', { method: 'POST', body: { user_id: Sync.st.userId, salt: b64e(salt), check_iv: chk.iv, check_ct: chk.data }, headers: { Prefer: 'return=minimal' } });
+      Sync.keys = keys;
+    } else {
+      const keys = await deriveKeys(pass, b64d(v[0].salt));
+      let ok = false; try { ok = (await decObj(keys, v[0].check_iv, v[0].check_ct)) === VERIFY_TEXT; } catch {}
+      if (!ok) throw new Error('Sai mật khẩu mã hoá');
+      Sync.keys = keys;
+      let replace = true;
+      if (S.transactions.length) replace = confirm('Trên mây đã có dữ liệu.\n\nOK = dùng dữ liệu trên mây, THAY dữ liệu đang có trong máy này.\nHuỷ = GỘP dữ liệu trong máy này lên mây.');
+      if (replace) { S = emptyState(); await store.set('state', S); Sync.st.preferRemote = true; }
+    }
+    Sync.st.enabled = true;
+    await store.set('synckeys', Sync.keys);
+    await syncPersist();
+  } catch (e) {
+    Sync.st = prev; Sync.keys = prev && prev.enabled ? Sync.keys : null;
+    throw e;
+  }
+  await syncNow({ silent: false });
+}
+async function syncOff() {
+  if (!confirm('Tắt đồng bộ trên máy này? Dữ liệu trong máy và trên mây vẫn giữ nguyên.')) return;
+  const st = Sync.st;
+  try { await fetch(st.url + '/auth/v1/logout', { method: 'POST', headers: { apikey: st.key, Authorization: 'Bearer ' + st.access } }); } catch {}
+  Sync.st = { url: st.url, key: st.key, email: st.email };
+  Sync.keys = null;
+  await syncPersist(); await store.set('synckeys', null);
+  openSettings(); toast('Đã tắt đồng bộ');
+}
+function syncSectionHTML() {
+  const st = Sync.st || {};
+  if (syncOn()) return `<h3>Đồng bộ đám mây</h3>
+    <p class="hint">Đang bật với tài khoản <b>${esc(st.email)}</b>. Dữ liệu được mã hoá ngay trên máy trước khi gửi đi.</p>
+    <p class="hint" id="syncStatus">${esc(syncStatusText())}</p>
+    <div class="btnrow"><button class="secondary" data-action="sync-now">Đồng bộ ngay</button><button class="secondary" data-action="sync-off">Tắt đồng bộ</button></div>`;
+  return `<h3>Đồng bộ đám mây</h3>
+    <p class="hint">Dùng project Supabase của riêng bạn (xem SUPABASE.md). Dữ liệu được mã hoá bằng mật khẩu mã hoá trước khi rời máy, nên Supabase cũng không đọc được.</p>
+    ${st.lastError ? `<p class="hint danger">${esc(st.lastError)}</p>` : ''}
+    <form id="syncForm" autocomplete="off">
+      <label class="field"><span>Project URL</span><input class="inp" id="sbUrl" inputmode="url" autocapitalize="off" placeholder="https://xxxx.supabase.co" value="${esc(st.url || '')}"></label>
+      <label class="field"><span>Publishable key (hoặc anon key)</span><input class="inp" id="sbKey" autocapitalize="off" value="${esc(st.key || '')}"></label>
+      <label class="field"><span>Email đăng nhập</span><input class="inp" id="sbEmail" type="email" autocomplete="username" autocapitalize="off" value="${esc(st.email || '')}"></label>
+      <label class="field"><span>Mật khẩu đăng nhập</span><input class="inp" id="sbPw" type="password" autocomplete="current-password"></label>
+      <label class="field"><span>Mật khẩu mã hoá</span><input class="inp" id="sbPass" type="password" autocomplete="off"></label>
+      <label class="field"><span>Nhập lại mật khẩu mã hoá (chỉ cần ở máy đầu tiên)</span><input class="inp" id="sbPass2" type="password" autocomplete="off"></label>
+      <p class="hint">Mật khẩu mã hoá phải giống nhau trên mọi máy. Quên nó thì bản trên mây không mở được, dữ liệu trong máy vẫn còn.</p>
+      <button class="primary" type="submit" id="sbGo">Bật đồng bộ</button>
+    </form>`;
+}
+function mountSyncForm(pn) {
+  const f = $('#syncForm', pn); if (!f) return;
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const btn = $('#sbGo', pn); btn.disabled = true; btn.textContent = 'Đang thiết lập…';
+    try {
+      await syncSetup({ url: $('#sbUrl').value, key: $('#sbKey').value, email: $('#sbEmail').value, password: $('#sbPw').value, pass: $('#sbPass').value, pass2: $('#sbPass2').value });
+      render(); openSettings();
+      toast(Sync.st && Sync.st.lastError ? 'Đã bật, nhưng lần đồng bộ đầu bị lỗi' : 'Đã bật đồng bộ');
+    } catch (err) {
+      toast(err.message); btn.disabled = false; btn.textContent = 'Bật đồng bộ';
+    }
+  };
+}
+
 /* ---------- settings ---------- */
 function openSettings() {
   const st = S.settings;
   const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   const ios = /iPhone|iPad/i.test(navigator.userAgent);
   openSheet(`<h2>Sao lưu và cài đặt</h2>
-  <p class="muted">Dữ liệu chỉ nằm trong máy này. Lần sao lưu gần nhất: <b>${st.lastBackup ? dmy(st.lastBackup.slice(0, 10)) : 'chưa có'}</b>.</p>
+  <p class="muted">${syncOn() ? 'Dữ liệu nằm trong máy và được đồng bộ (đã mã hoá) lên Supabase của bạn.' : 'Dữ liệu chỉ nằm trong máy này.'} Lần sao lưu file gần nhất: <b>${st.lastBackup ? dmy(st.lastBackup.slice(0, 10)) : 'chưa có'}</b>.</p>
   <div class="btnrow"><button class="secondary" data-action="backup-json">Sao lưu (.json)</button><button class="secondary" data-action="backup-xlsx">Xuất Excel</button></div>
   <p class="hint">File .json giữ đầy đủ mọi thứ, dùng để chuyển sang máy khác (iPhone, Android, máy tính). File Excel để xem và cũng nhập lại được.</p>
   <div class="btnrow"><button class="secondary" data-action="import">Nhập dữ liệu từ file</button></div>
+  ${syncSectionHTML()}
   <h3>Thay nhớt</h3>
   <label class="field"><span>Chu kỳ thay nhớt (km)</span><input class="inp" id="setInterval" inputmode="numeric" value="${st.oilInterval ?? 3000}"></label>
   ${ios && !standalone && !isNative() ? `<h3>Cài lên màn hình chính</h3><p class="hint">Trong Safari, bấm nút Chia sẻ rồi chọn "Thêm vào MH chính". App sẽ mở toàn màn hình và chạy được khi không có mạng.</p>` : ''}
@@ -773,12 +1028,14 @@ function openSettings() {
   <p class="hint">${nf0.format(S.transactions.length)} khoản chi, ${S.weddings.length} đám cưới, ${S.oil.length} lần thay nhớt, ${S.monthNotes.length} ghi chú tháng.</p>
   <div class="btnrow"><button class="secondary danger" data-action="wipe">Xoá toàn bộ dữ liệu</button></div>
   <p class="hint">Phiên bản dữ liệu ${DATA_VERSION}</p>`, pn => {
+    mountSyncForm(pn);
     $('#setInterval', pn).onchange = e => { const v = +String(e.target.value).replace(/\D/g, ''); if (v > 0) { S.settings.oilInterval = v; save(); toast('Đã lưu chu kỳ thay nhớt'); } };
   });
 }
 async function wipe() {
-  if (!confirm('Xoá toàn bộ dữ liệu trong máy? Hãy chắc chắn bạn đã sao lưu.')) return;
+  if (!confirm(syncOn() ? 'Xoá toàn bộ dữ liệu trong máy? Đồng bộ sẽ được tắt trên máy này, dữ liệu trên mây vẫn giữ nguyên.' : 'Xoá toàn bộ dữ liệu trong máy? Hãy chắc chắn bạn đã sao lưu.')) return;
   if (!confirm('Xác nhận lần nữa: xoá hết, không khôi phục được.')) return;
+  if (Sync.st) { Sync.st = { url: Sync.st.url, key: Sync.st.key, email: Sync.st.email }; Sync.keys = null; await syncPersist(); await store.set('synckeys', null); }
   S = emptyState(); await store.set('state', S); closeSheet(); render(); toast('Đã xoá toàn bộ dữ liệu');
 }
 
@@ -824,6 +1081,8 @@ document.addEventListener('click', e => {
     case 'backup-xlsx': exportExcel(); break;
     case 'import': $('#fileInput').value = ''; $('#fileInput').click(); break;
     case 'wipe': wipe(); break;
+    case 'sync-now': syncNow({ silent: false }).then(() => { if ($('#sheet').classList.contains('open')) showSyncStatus(); else render(); }); showSyncStatus(); break;
+    case 'sync-off': syncOff(); break;
   }
 });
 document.addEventListener('submit', e => { if (e.target.id === 'entryForm') submitEntry(e); });
@@ -847,7 +1106,11 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet()
   try { await store.open(); } catch (e) { console.warn('IndexedDB lỗi, dùng localStorage', e); }
   try { const d = await store.get('state'); if (d) S = normalize(d); } catch (e) { toast('Không đọc được dữ liệu: ' + e.message); }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  await syncLoad();
   render();
+  if (syncOn()) syncNow();
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') scheduleSync(800); });
+  window.addEventListener('online', () => scheduleSync(800));
   if ('serviceWorker' in navigator && !isNative() && (location.protocol === 'https:' || location.hostname === 'localhost')) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
