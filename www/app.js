@@ -3,7 +3,7 @@
 
 const APP_ID = 'so-chi-tieu';
 const DATA_VERSION = 1;
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.1.2';
 
 const DEFAULT_CATS = [
   { id: 'an', short: 'Ăn uống', name: 'Ăn uống hằng ngày', group: 'Thiết yếu', color: '#1F8A9E' },
@@ -230,7 +230,7 @@ function renderEntry() {
   <form class="card" id="entryForm" autocomplete="off">
     <div class="amount">
       <label class="sr" for="amt">Số tiền (nghìn đồng)</label>
-      <input id="amt" inputmode="decimal" placeholder="0" enterkeyhint="done">
+      <input id="amt" inputmode="decimal" placeholder="0" enterkeyhint="done" autocomplete="off" autocorrect="off" spellcheck="false">
       <span class="unit">k</span>
       <button type="button" class="plus" data-action="plus" aria-label="Thêm dấu cộng">+</button>
     </div>
@@ -1134,6 +1134,10 @@ document.addEventListener('change', e => {
   else if (t.id === 'fileInput' && t.files[0]) handleImportFile(t.files[0]);
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
+// Bàn phím mở: ẩn thanh tab để không đè lên ô đang nhập
+const isTextField = el => el && (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || (el.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit', 'file'].includes(el.type)));
+document.addEventListener('focusin', e => { if (isTextField(e.target)) document.body.classList.add('kb'); });
+document.addEventListener('focusout', () => setTimeout(() => { if (!isTextField(document.activeElement)) document.body.classList.remove('kb'); }, 80));
 
 /* ---------- boot ---------- */
 (async function boot() {

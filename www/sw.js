@@ -2,7 +2,7 @@
    - index.html, app.js, manifest: ưu tiên mạng (luôn lấy bản mới nhất), mất mạng thì dùng bản đã lưu
    - font, icon, thư viện: ưu tiên bản đã lưu
    Đổi VERSION mỗi khi cập nhật code. */
-const VERSION = 'v1.1.1';
+const VERSION = 'v1.1.2';
 const CACHE = 'so-chi-tieu-' + VERSION;
 const FILES = [
   './', './index.html', './app.js', './manifest.webmanifest', './vendor/xlsx.mini.min.js',
