@@ -5,8 +5,8 @@ App ghi chi tiêu cá nhân. Có tổng kết theo tháng và năm, sổ tiền 
 - **Một bộ code, chạy ở hai nơi:**
   - **iPhone:** dùng dạng PWA (cài từ Safari lên màn hình chính).
   - **Android:** dùng file APK cài riêng, hoặc cũng dùng PWA như iPhone.
-- **Dữ liệu chỉ nằm trong máy.** Không có server, không gửi đi đâu.
-- **Chuyển máy:** xuất file `.json` (hoặc Excel) rồi nhập vào máy mới.
+- **Dữ liệu nằm trong máy.** Có thể bật thêm **đồng bộ đám mây mã hoá đầu-cuối** qua Supabase của riêng bạn (xem [SUPABASE.md](SUPABASE.md)), để dùng nhiều máy và không sợ mất dữ liệu.
+- **Chuyển máy:** bật đồng bộ, hoặc xuất file `.json` (hay Excel) rồi nhập vào máy mới.
 
 > ⚠️ Repo này để **công khai** (GitHub Pages miễn phí yêu cầu vậy). **Không bao giờ** đưa file dữ liệu (`chi-tieu-data.json`, file `.xlsx`, file sao lưu) lên đây. `.gitignore` đã chặn sẵn các file này.
 
@@ -20,6 +20,7 @@ www/                  Toàn bộ app (HTML/JS, chạy offline)
   vendor/             SheetJS (đọc/ghi Excel)
   fonts/ icons/
 resources/android/    Icon cho bản Android
+supabase/schema.sql   Bảng dữ liệu cho đồng bộ đám mây (chạy trong Supabase)
 .github/workflows/
   pages.yml           Đưa www/ lên GitHub Pages (link cho iPhone)
   android.yml         Build file APK Android
