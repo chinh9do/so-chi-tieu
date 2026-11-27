@@ -218,13 +218,24 @@ input[type=search]::-webkit-search-decoration,input[type=search]::-webkit-search
 body.kb .tabs{display:none}                       /* ẩn thanh tab khi bàn phím đang mở để không che ô nhập */
 body.kb main{padding-bottom:24px}
 .amount input{font-size:44px}
+.fitline{display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;text-align:left;border:0;background:var(--surface);border-radius:var(--r-md);padding:11px 14px;margin-top:12px;font-weight:500;font-size:14.5px}
+.weekdots{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:14px;text-align:center;font-size:11.5px;color:var(--muted)}
+.weekdots i{display:block;height:28px;border-radius:8px;background:var(--sunk);margin-bottom:4px}
+.weekdots .on i{background:var(--accent)}
+.weekdots .today i{box-shadow:inset 0 0 0 2px var(--ink)}
+.weekdots .today{color:var(--ink);font-weight:700}
+.effort{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.effort button{border:1px solid var(--line);background:var(--surface);border-radius:var(--r-sm);min-height:40px;font-weight:500}
+.effort button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.amount.small input{font-size:24px;font-weight:700;padding:6px 0}
+.amount.small{border-bottom-width:2px}
 </style>
 </head>
 <body>
 <header class="top">
   <h1 id="title">Sổ chi tiêu</h1>
-  <button class="iconbtn" data-action="settings" aria-label="Cài đặt và sao lưu">
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+  <button class="iconbtn" data-action="menu" aria-label="Menu: tiền cưới, sao lưu, cài đặt">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
   </button>
 </header>
 <main id="view" aria-live="polite"></main>
@@ -233,7 +244,7 @@ body.kb main{padding-bottom:24px}
     <button class="tab" data-tab="nhap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>Nhập</button>
     <button class="tab" data-tab="so"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3z"/><path d="M9 9h6M9 13h6"/></svg>Sổ</button>
     <button class="tab" data-tab="tong"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M5 20V11M12 20V5M19 20v-6"/></svg>Tổng kết</button>
-    <button class="tab" data-tab="cuoi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="12" rx="2"/><path d="M3 10l9 5 9-5"/></svg>Tiền cưới</button>
+    <button class="tab" data-tab="tap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3c1 3.5 5 5.5 5 10a5 5 0 0 1-10 0c0-2.2 1-3.6 2.2-4.8.3 1.6 1.1 2.6 2.3 2.8-.6-2.6-.2-5.2.5-8z"/></svg>Tập</button>
     <button class="tab" data-tab="xe"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="17" r="3"/><circle cx="18" cy="17" r="3"/><path d="M9 17h6l-3-7h4l2 7M8 10h4"/></svg>Xe</button>
   </div>
 </nav>
